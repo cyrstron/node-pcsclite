@@ -6,6 +6,8 @@ using namespace node;
 
 Nan::Persistent<Function> PCSCLite::constructor;
 
+Nan::AsyncResource *PCSCLite::async_resource = new Nan::AsyncResource("PCSCLite_StaticAsyncResource");
+
 void PCSCLite::init(Local<Object> target) {
 
     // Prepare constructor template
@@ -17,6 +19,7 @@ void PCSCLite::init(Local<Object> target) {
     Nan::SetPrototypeTemplate(tpl, "close", Nan::New<FunctionTemplate>(Close));
 
     Local<Function> newfunc = Nan::GetFunction(tpl).ToLocalChecked();
+    
     constructor.Reset(newfunc);
     Nan::Set(target, Nan::New("PCSCLite").ToLocalChecked(), newfunc);
 }
@@ -29,10 +32,52 @@ PCSCLite::PCSCLite(): m_card_context(0),
     assert(uv_mutex_init(&m_mutex) == 0);
     assert(uv_cond_init(&m_cond) == 0);
 
-    LONG result = SCardEstablishContext(SCARD_SCOPE_SYSTEM,
-                                        NULL,
-                                        NULL,
-                                        &m_card_context);
+    // TODO: consider removing this Windows workaround that should not be needed anymore
+    #ifdef _WIN32
+        HKEY hKey;
+        DWORD startStatus, datacb = sizeof(DWORD);
+        LONG _res;
+        _res = RegOpenKeyEx(HKEY_LOCAL_MACHINE, "System\\CurrentControlSet\\Services\\SCardSvr", 0, KEY_READ, &hKey);
+        if (_res != ERROR_SUCCESS) {
+            printf("Reg Open Key exited with %d\n", _res);
+            goto postServiceCheck;
+        }
+        _res = RegQueryValueEx(hKey, "Start", NULL, NULL, (LPBYTE)&startStatus, &datacb);
+        if (_res != ERROR_SUCCESS) {
+            printf("Reg Query Value exited with %d\n", _res);
+            goto postServiceCheck;
+        }
+        if (startStatus != 2) {
+            SHELLEXECUTEINFO seInfo = {0};
+            seInfo.cbSize = sizeof(SHELLEXECUTEINFO);
+            seInfo.fMask = SEE_MASK_NOCLOSEPROCESS;
+            seInfo.hwnd = NULL;
+            seInfo.lpVerb = "runas";
+            seInfo.lpFile = "sc.exe";
+            seInfo.lpParameters = "config SCardSvr start=auto";
+            seInfo.lpDirectory = NULL;
+            seInfo.nShow = SW_SHOWNORMAL;
+            seInfo.hInstApp = NULL;
+            if (!ShellExecuteEx(&seInfo)) {
+                printf("Shell Execute failed with %d\n", GetLastError());
+                goto postServiceCheck;
+            }
+            WaitForSingleObject(seInfo.hProcess, INFINITE);
+            CloseHandle(seInfo.hProcess);
+        }
+    postServiceCheck:
+    #endif // _WIN32
+
+    LONG result;
+    // TODO: consider removing this do-while Windows workaround that should not be needed anymore
+    do {
+        // TODO: make dwScope (now hard-coded to SCARD_SCOPE_SYSTEM) customisable
+        result = SCardEstablishContext(SCARD_SCOPE_SYSTEM,
+                                            NULL,
+                                            NULL,
+                                            &m_card_context);
+    } while((unsigned)result == SCARD_E_NO_SERVICE || (unsigned)result == SCARD_E_SERVICE_STOPPED);
+
     if (result != SCARD_S_SUCCESS) {
         Nan::ThrowError(error_msg("SCardEstablishContext", result).c_str());
     } else {
@@ -126,7 +171,7 @@ NAN_METHOD(PCSCLite::Close) {
     info.GetReturnValue().Set(Nan::New<Number>(result));
 }
 
-void PCSCLite::HandleReaderStatusChange(uv_async_t *handle, int status) {
+void PCSCLite::HandleReaderStatusChange(uv_async_t *handle) {
 
     Nan::HandleScope scope;
 
@@ -143,10 +188,10 @@ void PCSCLite::HandleReaderStatusChange(uv_async_t *handle, int status) {
             Nan::CopyBuffer(ar->readers_name, ar->readers_name_length).ToLocalChecked()
         };
 
-        Nan::Call(Nan::Callback(Nan::New(async_baton->callback)), argc, argv);
+        Nan::Callback(Nan::New(async_baton->callback)).Call(argc, argv, async_resource);
     } else {
         Local<Value> argv[1] = { Nan::Error(ar->err_msg.c_str()) };
-        Nan::Call(Nan::Callback(Nan::New(async_baton->callback)), 1, argv);
+        Nan::Callback(Nan::New(async_baton->callback)).Call(1, argv, async_resource);
     }
 
     // Do exit, after throwing last events
@@ -295,6 +340,11 @@ LONG PCSCLite::get_card_readers(PCSCLite* pcsclite, AsyncResult* async_result) {
             result = get_card_readers(pcsclite, async_result);
         }
 #endif
+        if ((unsigned)result == SCARD_E_NO_SERVICE || (unsigned)result == SCARD_E_SERVICE_STOPPED) {
+            SCardReleaseContext(pcsclite->m_card_context);
+            SCardEstablishContext(SCARD_SCOPE_SYSTEM, NULL, NULL, &pcsclite->m_card_context);
+            result = get_card_readers(pcsclite, async_result);
+        }
     } else {
         /* Store the readers_name in the baton */
         async_result->readers_name = readers_name;

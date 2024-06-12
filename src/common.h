@@ -19,7 +19,7 @@ namespace {
     std::string error_msg(const char* method, LONG result) {
         char msg[ERR_MSG_MAX_LEN];
 #ifdef _WIN32
-        LPVOID lpMsgBuf;
+        LPTSTR lpMsgBuf;
         FormatMessageA(FORMAT_MESSAGE_ALLOCATE_BUFFER |
                        FORMAT_MESSAGE_FROM_SYSTEM |
                        FORMAT_MESSAGE_IGNORE_INSERTS,

@@ -15,6 +15,12 @@
 #define MAX_ATR_SIZE 33
 #endif
 
+#ifdef WIN32
+#define IOCTL_CCID_ESCAPE (0x42000000 + 3500)
+#else
+#define IOCTL_CCID_ESCAPE (0x42000000 + 1)
+#endif
+
 static Nan::Persistent<v8::String> name_symbol;
 static Nan::Persistent<v8::String> connected_symbol;
 
@@ -102,7 +108,7 @@ class CardReader: public Nan::ObjectWrap {
         static NAN_METHOD(Control);
         static NAN_METHOD(Close);
 
-        static void HandleReaderStatusChange(uv_async_t *handle, int status);
+        static void HandleReaderStatusChange(uv_async_t *handle);
         static void HandlerFunction(void* arg);
         static void DoConnect(uv_work_t* req);
         static void DoDisconnect(uv_work_t* req);
@@ -115,6 +121,8 @@ class CardReader: public Nan::ObjectWrap {
         static void AfterTransmit(uv_work_t* req, int status);
         static void AfterControl(uv_work_t* req, int status);
 
+        static v8::Local<v8::Value> CreateBufferInstance(char* data, unsigned long size);
+
     private:
 
         SCARDCONTEXT m_card_context;
@@ -125,6 +133,7 @@ class CardReader: public Nan::ObjectWrap {
         uv_mutex_t m_mutex;
         uv_cond_t m_cond;
         int m_state;
+        static Nan::AsyncResource *async_resource;
 };
 
 #endif /* CARDREADER_H */
